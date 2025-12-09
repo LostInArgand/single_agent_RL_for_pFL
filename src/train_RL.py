@@ -12,6 +12,7 @@ from torchvision import datasets, transforms
 
 
 from models.RL_model import PolicyNet
+from models.resnet18 import ResNet18CIFAR
 from models.simple_CNN_for_CIFAR_10 import CIFAR10CNN
 from data_loaders.cifar_10_dataloader import get_cifar10_dirichlet_clients
 
@@ -125,6 +126,9 @@ def fedavg(global_model, client_models, client_idcs):
         # get client weights on CPU
         client_state = {k: v.detach().cpu() for k, v in client_model.state_dict().items()}
         for k in avg_state.keys():
+            if not torch.is_floating_point(avg_state[k]):
+                # skip non-floating tensors
+                continue
             avg_state[k] += client_state[k] * weight
 
     global_model_cpu.load_state_dict(avg_state)
@@ -169,7 +173,7 @@ def train_federated_rl(
     )
 
     # ---------- Models ----------
-    global_model = CIFAR10CNN(num_classes=10)
+    global_model = ResNet18CIFAR(num_classes=10)
     num_actions = global_model.num_layers_for_rl  # depths 1..L
 
     # RL policy
@@ -193,7 +197,7 @@ def train_federated_rl(
         # 1) For each client: RL chooses depth, client trains locally
         for cid in range(num_clients):
             # copy global model to client
-            client_model = CIFAR10CNN(num_classes=10)
+            client_model = ResNet18CIFAR(num_classes=10)
             client_model.load_state_dict(global_model.state_dict())
 
             # RL chooses depth
@@ -275,7 +279,7 @@ def train_federated_rl(
         global_model=global_model,
         client_models=client_models,   # <-- last-round client models used in FedAvg
         policy_net=policy_net,
-        save_dir="/local/scratch/a/dalwis/single_agent_RL_for_pFL/src/weights/split_2_clients_CIFAR10"
+        save_dir="/local/scratch/a/dalwis/single_agent_RL_for_pFL/src/weights/split_2_clients_resnet18"
     )
 
     return global_model, policy_net
@@ -333,11 +337,11 @@ if __name__ == "__main__":
         data_root="/local/scratch/a/dalwis/single_agent_RL_for_pFL/data/cifar_10/split_2_clients",
         num_clients=2,
         batch_size=64,
-        num_rounds=10,
-        local_epochs=1,
+        num_rounds=50,
+        local_epochs=4,
         lr_local=0.01,
         momentum_local=0.9,
         rl_lr=1e-3,
-        lambda_dist=1e-4,   # penalty weight for Euclidean distance
+        lambda_dist=1e-2,   # penalty weight for Euclidean distance
         seed=123,
     )
