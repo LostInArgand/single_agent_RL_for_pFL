@@ -1,3 +1,4 @@
 data/
 src/weights
 src/data_loaders/__pycache__
+src/models/__pycache__
