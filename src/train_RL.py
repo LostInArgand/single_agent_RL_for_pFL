@@ -172,6 +172,16 @@ def train_federated_rl(
         seed=seed,
     )
 
+    testset = datasets.CIFAR10(
+        root=data_root,
+        train=False,
+        download=True,
+        transform=transforms.ToTensor()
+    )
+
+    testloader = DataLoader(testset, batch_size=128, shuffle=False)
+
+
     # ---------- Models ----------
     global_model = ResNet18CIFAR(num_classes=10)
     num_actions = global_model.num_layers_for_rl  # depths 1..L
@@ -267,7 +277,7 @@ def train_federated_rl(
         global_model = fedavg(global_model, client_models, client_idcs)
 
         # quick global evaluation on union of all data (optional)
-        global_acc = evaluate_global(global_model, client_loaders, device)
+        global_acc = evaluate_global(global_model, testloader, device)
         print(f"Global model accuracy (on all client data): {global_acc:.4f}")
 
     print("\nTraining finished.")
@@ -289,22 +299,20 @@ def train_federated_rl(
 # 6. Evaluation helper
 # ============================================================
 
-def evaluate_global(global_model, client_loaders, device):
+def evaluate_global(global_model, testloader, device):
     global_model.to(device)
     global_model.eval()
     correct = 0
     total = 0
-
     with torch.no_grad():
-        for cid, loader in client_loaders.items():
-            for x, y in loader:
-                x, y = x.to(device), y.to(device)
-                logits = global_model(x)
-                pred = logits.argmax(dim=1)
-                correct += (pred == y).sum().item()
-                total += y.size(0)
+        for x, y in testloader:
+            x, y = x.to(device), y.to(device)
+            logits = global_model(x)   # Use ONLY global model, no personal heads
+            _, pred = torch.max(logits, dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+    return correct / total
 
-    return correct / total if total > 0 else 0.0
 
 def save_models(global_model, client_models, policy_net, save_dir="saved_models"):
     os.makedirs(save_dir, exist_ok=True)
