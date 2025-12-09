@@ -1,1 +1,3 @@
 data/
+src/weights
+src/data_loaders/__pycache__
