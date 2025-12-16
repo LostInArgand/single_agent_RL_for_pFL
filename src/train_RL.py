@@ -1,19 +1,17 @@
 import os
-import math
 import random
 import numpy as np
+
 from collections import defaultdict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-
 
 from models.RL_model import PolicyNet
 from models.resnet18 import ResNet18CIFAR
-from models.simple_CNN_for_CIFAR_10 import CIFAR10CNN
 from data_loaders.cifar_10_dataloader import get_cifar10_dirichlet_clients
 
 
@@ -28,11 +26,13 @@ def set_seed(seed: int = 123):
     torch.cuda.manual_seed_all(seed)
 
 
-def set_trainable_depth(model: CIFAR10CNN, depth: int):
+def set_trainable_depth(model: nn.Module, depth: int):
     """
     depth in [1, model.num_layers_for_rl]
     Layers [0, depth-1] are trainable; others are frozen.
-    Layers = [block1, block2, block3, classifier]
+    Assumes:
+        model.blocks is an iterable of blocks
+        model.classifier is the final head
     """
     assert 1 <= depth <= model.num_layers_for_rl
     layers = list(model.blocks) + [model.classifier]
@@ -41,25 +41,30 @@ def set_trainable_depth(model: CIFAR10CNN, depth: int):
         trainable = (i < depth)
         for p in layer.parameters():
             p.requires_grad = trainable
+
+
+# ============================================================
+# 1. RL action selection
 # ============================================================
 
-def select_action(policy_net, client_id, num_clients, device):
+def select_action(policy_net, state_vec, device):
     """
+    Args:
+        state_vec: list/np array of length state_dim
     Returns:
-        action (int, depth in [1..num_layers])
+        action (int)  in [1..num_actions]  = number of layers to share
         logprob (tensor)
     """
-    state = F.one_hot(torch.tensor([client_id], device=device),
-                      num_classes=num_clients).float()  # shape [1, num_clients]
+    state = torch.tensor(state_vec, dtype=torch.float32, device=device).unsqueeze(0)  # [1, state_dim]
     logits = policy_net(state)
     dist = torch.distributions.Categorical(logits=logits)
-    action_idx = dist.sample()         # 0 .. num_actions-1
+    action_idx = dist.sample()  # 0..num_actions-1
     logprob = dist.log_prob(action_idx)
-    return (action_idx.item() + 1), logprob   # depth = idx + 1
+    return (action_idx.item() + 1), logprob   # map to [1..num_actions]
 
 
 # ============================================================
-# 4. Federated helpers: FedAvg & local training
+# 2. Federated helpers: local training
 # ============================================================
 
 def local_train(model,
@@ -109,30 +114,126 @@ def local_train(model,
     return model, acc
 
 
-def fedavg(global_model, client_models, client_idcs):
+# ============================================================
+# 3. Layer mapping and partial FedAvg
+# ============================================================
+
+def get_layer_param_names(model: nn.Module):
     """
-    FedAvg: weighted average of client models by number of samples.
+    Returns:
+        layer_param_names: list of lists.
+        layer_param_names[i] = list of param names belonging to layer i.
+    Assumes:
+        model.blocks is an nn.ModuleList (or similar)
+        model.classifier exists.
+    Layers are [blocks[0], blocks[1], ..., classifier]
     """
-    # initialize with zeros
+    layer_param_names = []
+
+    num_blocks = len(list(model.blocks))
+    for layer_idx in range(num_blocks + 1):
+        names_for_layer = []
+        for name, _ in model.named_parameters():
+            if layer_idx < num_blocks:
+                prefix = f"blocks.{layer_idx}."
+                if name.startswith(prefix):
+                    names_for_layer.append(name)
+            else:
+                # last layer: classifier
+                if name.startswith("classifier."):
+                    names_for_layer.append(name)
+        layer_param_names.append(names_for_layer)
+
+    return layer_param_names
+
+
+def fedavg_partial(global_model,
+                   client_models,
+                   client_idcs,
+                   client_share_depths):
+    """
+    FedAvg only over layers that clients actually share.
+
+    Args:
+        global_model: nn.Module
+        client_models: dict[cid] -> nn.Module
+        client_idcs: dict[cid] -> indices of samples
+        client_share_depths: dict[cid] -> int (how many layers client c shared)
+    Returns:
+        updated global_model (on CPU)
+    """
     global_model_cpu = global_model.to("cpu")
     global_state = global_model_cpu.state_dict()
 
-    avg_state = {k: torch.zeros_like(v, device="cpu") for k, v in global_state.items()}
+    # Start from current global params
+    new_state = {k: v.clone() for k, v in global_state.items()}
 
-    total_samples = sum(len(idcs) for idcs in client_idcs.values())
+    # Get param names per layer
+    layer_param_names = get_layer_param_names(global_model_cpu)
+
+    # For each client, compute which param names they share
+    client_shared_params = {}
+    for cid, depth in client_share_depths.items():
+        shared_names = []
+        # depth in [1..num_layers]; share layers [0..depth-1]
+        for li in range(depth):
+            shared_names.extend(layer_param_names[li])
+        client_shared_params[cid] = set(shared_names)
+
+    # For each parameter, average only over contributing clients
+    for name, param in global_state.items():
+        if not torch.is_floating_point(param):
+            continue
+
+        contributors = [
+            cid for cid in client_models.keys()
+            if name in client_shared_params[cid]
+        ]
+
+        if len(contributors) == 0:
+            # Nobody shared this param: keep old global value
+            continue
+
+        # Weighted by number of samples of contributing clients
+        total_samples = sum(len(client_idcs[cid]) for cid in contributors)
+        avg_param = torch.zeros_like(param)
+
+        for cid in contributors:
+            weight = len(client_idcs[cid]) / total_samples
+            client_param = client_models[cid].state_dict()[name].detach().cpu()
+            avg_param += weight * client_param
+
+        new_state[name] = avg_param
+
+    global_model_cpu.load_state_dict(new_state)
+    return global_model_cpu
+
+
+def update_clients_with_global(global_model,
+                               client_models,
+                               client_share_depths):
+    """
+    Overwrite only the shared layers of each client model
+    with the new global parameters.
+    """
+    global_cpu = global_model.to("cpu")
+    global_state = global_cpu.state_dict()
+    layer_param_names = get_layer_param_names(global_cpu)
 
     for cid, client_model in client_models.items():
-        weight = len(client_idcs[cid]) / total_samples
-        # get client weights on CPU
-        client_state = {k: v.detach().cpu() for k, v in client_model.state_dict().items()}
-        for k in avg_state.keys():
-            if not torch.is_floating_point(avg_state[k]):
-                # skip non-floating tensors
-                continue
-            avg_state[k] += client_state[k] * weight
+        depth = client_share_depths[cid]
+        # Which params belong to layers [0..depth-1] for this client
+        shared_names = []
+        for li in range(depth):
+            shared_names.extend(layer_param_names[li])
+        shared_names = set(shared_names)
 
-    global_model_cpu.load_state_dict(avg_state)
-    return global_model_cpu
+        client_state = client_model.state_dict()
+        for name in shared_names:
+            if name in client_state:
+                client_state[name] = global_state[name].clone()
+
+        client_model.load_state_dict(client_state)
 
 
 def model_to_vector(model: nn.Module) -> torch.Tensor:
@@ -141,9 +242,33 @@ def model_to_vector(model: nn.Module) -> torch.Tensor:
     """
     return torch.cat([p.detach().cpu().view(-1) for p in model.parameters()])
 
+def model_to_vectors(model: nn.Module):
+    """
+    Returns 6 separate flattened vectors (on CPU), one per RL layer.
+
+    Layer order matches your RL/fedavg code:
+      [blocks[0], blocks[1], blocks[2], blocks[3], blocks[4], classifier]
+
+    Returns:
+        vectors: list[torch.Tensor] length = model.num_layers_for_rl (typically 6)
+                 each tensor is 1D on CPU
+    """
+    # The same "layer" definition you use elsewhere
+    layers = list(model.blocks) + [model.classifier]
+
+    vectors = []
+    for layer in layers:
+        params = [p.detach().cpu().view(-1) for p in layer.parameters()]
+        if len(params) == 0:
+            vectors.append(torch.empty(0, dtype=torch.float32))
+        else:
+            vectors.append(torch.cat(params, dim=0))
+
+    return vectors
+
 
 # ============================================================
-# 5. RL + Federated training loop
+# 4. RL + Federated training loop
 # ============================================================
 
 def train_federated_rl(
@@ -157,12 +282,26 @@ def train_federated_rl(
     momentum_local=0.9,
     rl_lr=1e-3,
     lambda_dist=1e-4,
+    lambda_comm=1e-2,               # comm violation penalty weight
+    communication_budgets=None,     # list/array of ints per client
     seed=123,
 ):
     set_seed(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
+
+    # ---------- Models & communication budgets ----------
+    global_model = ResNet18CIFAR(num_classes=10)
+    num_actions = global_model.num_layers_for_rl  # depths / layers 1..L
+
+    if communication_budgets is None:
+        communication_budgets = [num_actions] * num_clients
+    else:
+        assert len(communication_budgets) == num_clients
+
+    # Track last accuracy per client (for RL state input)
+    client_last_accs = [0.0 for _ in range(num_clients)]
 
     # ---------- Data ----------
     trainset, client_idcs, client_loaders = get_cifar10_dirichlet_clients(
@@ -181,48 +320,60 @@ def train_federated_rl(
 
     testloader = DataLoader(testset, batch_size=128, shuffle=False)
 
-
-    # ---------- Models ----------
-    global_model = ResNet18CIFAR(num_classes=10)
-    num_actions = global_model.num_layers_for_rl  # depths 1..L
-
-    # RL policy
+    # ---------- RL policy ----------
     rl_device = device
-    policy_net = PolicyNet(num_clients=num_clients,
+    state_dim = 3  # [communication_budget, last_accuracy, client_id]
+    policy_net = PolicyNet(state_dim=state_dim,
                            num_actions=num_actions,
                            hidden_dim=32).to(rl_device)
     policy_opt = torch.optim.Adam(policy_net.parameters(), lr=rl_lr)
 
-    print(f"RL will choose depth in [1, {num_actions}] for each client.")
+    print(f"RL will choose number of shared layers in [1, {num_actions}] for each client.")
+
+    # Initialize client models (personalized copy per client)
+    client_models = {
+        cid: ResNet18CIFAR(num_classes=10) for cid in range(num_clients)
+    }
+    for cid in range(num_clients):
+        client_models[cid].load_state_dict(global_model.state_dict())
 
     # ---------- Training ----------
     for global_round in range(num_rounds):
         print(f"\n=== Global Round {global_round + 1}/{num_rounds} ===")
 
-        client_models = {}
         client_accuracies = {}
         client_logprobs = {}
         client_vectors = {}
+        client_share_depths = {}
+        # client_features = {}
 
-        # 1) For each client: RL chooses depth, client trains locally
+        # 1) For each client: RL chooses number of layers to share, client trains locally
         for cid in range(num_clients):
-            # copy global model to client
-            client_model = ResNet18CIFAR(num_classes=10)
-            client_model.load_state_dict(global_model.state_dict())
+            client_model = client_models[cid]  # persistent model
 
-            # RL chooses depth
-            depth, logprob = select_action(
+            # ----- Build RL state [budget, last_acc, client_id] -----
+            budget = communication_budgets[cid]
+            last_acc = client_last_accs[cid]
+            # simple normalization
+            budget_norm = budget / float(num_actions)
+            last_acc_norm = last_acc          # already in [0,1]
+            client_id_norm = cid / max(1, (num_clients - 1))
+
+            state_vec = [budget_norm, last_acc_norm, client_id_norm]
+
+            # RL chooses how many layers to share
+            layers_to_share, logprob = select_action(
                 policy_net=policy_net,
-                client_id=cid,
-                num_clients=num_clients,
+                state_vec=state_vec,
                 device=rl_device,
             )
             client_logprobs[cid] = logprob
+            client_share_depths[cid] = layers_to_share
 
-            # set layer trainability according to depth
-            set_trainable_depth(client_model, depth=depth)
+            # ------ Local training ------
+            # Optionally couple training depth with sharing:
+            # set_trainable_depth(client_model, depth=layers_to_share)
 
-            # local training
             client_model, acc = local_train(
                 model=client_model,
                 dataloader=client_loaders[cid],
@@ -234,27 +385,61 @@ def train_federated_rl(
 
             client_models[cid] = client_model
             client_accuracies[cid] = acc
+            client_last_accs[cid] = acc  # update history
             client_vectors[cid] = model_to_vector(client_model)
+            # client_model.eval()
+            # with torch.no_grad():
+            #     # Take ONE small batch from this client's loader as reference
+            #     # (you can use more batches if you want less noise)
+            #     # x_rep, _ = next(iter(client_loaders[cid]))
+            #     x_rep, _ = next(iter(testloader))
+            #     x_rep = x_rep.to(device)
 
-            print(f"  Client {cid}: depth={depth}, local_acc={acc:.4f}")
+            #     feats = client_model.forward_features(x_rep)   # (B, 512)
+            #     feats = F.normalize(feats, p=2, dim=1)        # normalize per sample
+            #     mean_feat = feats.mean(dim=0)                 # (512,)
+            #     mean_feat = F.normalize(mean_feat, p=2, dim=0)
 
-        # 2) Compute pairwise distances & rewards
+            # client_features[cid] = mean_feat.cpu()
+            # client_model.train()
+            print(f"  Client {cid}: layers_shared={layers_to_share}, local_acc={acc:.4f}")
+
+        # 2) Compute pairwise distances & rewards (with comm penalty)
         rewards = {}
         for cid in range(num_clients):
             vec_c = client_vectors[cid]
+            # feat_c = client_features[cid]
             dists = []
             for other_cid in range(num_clients):
                 if other_cid == cid:
                     continue
                 vec_o = client_vectors[other_cid]
-                d = torch.norm(vec_c - vec_o, p=2).item()
+                # feat_o = client_features[other_cid]
+                d = torch.norm(vec_c - vec_o, p=2).item()   # Euclidean distance
+                # cos_sim = F.cosine_similarity(
+                #     feat_c.unsqueeze(0),  # shape (1, 512)
+                #     feat_o.unsqueeze(0),  # shape (1, 512)
+                #     dim=1
+                # ).item()
+                # d = 1 - cos_sim
                 dists.append(d)
             mean_dist = np.mean(dists) if len(dists) > 0 else 0.0
 
-            reward = client_accuracies[cid] - lambda_dist * mean_dist
+            base_reward = client_accuracies[cid] - lambda_dist * mean_dist
+
+            # Communication violation penalty: if layers_to_share > budget
+            layers_sh = client_share_depths[cid]
+            budget = communication_budgets[cid]
+            violation = max(0, layers_sh - budget)
+            comm_penalty = lambda_comm * violation
+
+            reward = base_reward - comm_penalty
             rewards[cid] = reward
 
             print(f"  Client {cid}: mean_dist={mean_dist:.2f}, "
+                  f"base_reward={base_reward:.4f}, "
+                  f"violation={violation}, "
+                  f"comm_penalty={comm_penalty:.4f}, "
                   f"reward={reward:.4f}")
 
         # 3) RL policy update (REINFORCE with per-round baseline)
@@ -264,7 +449,6 @@ def train_federated_rl(
 
         for cid in range(num_clients):
             advantage = rewards[cid] - baseline
-            # negative for gradient ascent
             policy_loss = policy_loss - client_logprobs[cid] * advantage
 
         policy_loss = policy_loss / num_clients
@@ -273,12 +457,24 @@ def train_federated_rl(
 
         print(f"  RL policy loss: {policy_loss.item():.6f}")
 
-        # FedAvg to update global model
-        global_model = fedavg(global_model, client_models, client_idcs)
+        # 4) FedAvg only on shared layers
+        global_model = fedavg_partial(global_model,
+                                      client_models,
+                                      client_idcs,
+                                      client_share_depths)
 
-        # quick global evaluation on union of all data (optional)
-        global_acc = evaluate_global(global_model, testloader, device)
-        print(f"Global model accuracy (on all client data): {global_acc:.4f}")
+        # 5) Push updated shared layers back to each client model
+        update_clients_with_global(global_model,
+                                   client_models,
+                                   client_share_depths)
+
+        # 6) Evaluate global model and each client on the SAME test set
+        global_acc = evaluate_model(global_model, testloader, device)
+        print(f"Global model accuracy (test set): {global_acc:.4f}")
+
+        for cid, cmodel in client_models.items():
+            c_acc = evaluate_model(cmodel, testloader, device)
+            print(f"  Client {cid} model accuracy on test set: {c_acc:.4f}")
 
     print("\nTraining finished.")
 
@@ -287,7 +483,7 @@ def train_federated_rl(
     # ================================
     save_models(
         global_model=global_model,
-        client_models=client_models,   # <-- last-round client models used in FedAvg
+        client_models=client_models,   # last-round client models
         policy_net=policy_net,
         save_dir="/local/scratch/a/dalwis/single_agent_RL_for_pFL/src/weights/split_2_clients_resnet18"
     )
@@ -296,18 +492,21 @@ def train_federated_rl(
 
 
 # ============================================================
-# 6. Evaluation helper
+# 5. Evaluation & saving
 # ============================================================
 
-def evaluate_global(global_model, testloader, device):
-    global_model.to(device)
-    global_model.eval()
+def evaluate_model(model, testloader, device):
+    """
+    Generic evaluator: runs any model on the CIFAR-10 test set.
+    """
+    model.to(device)
+    model.eval()
     correct = 0
     total = 0
     with torch.no_grad():
         for x, y in testloader:
             x, y = x.to(device), y.to(device)
-            logits = global_model(x)   # Use ONLY global model, no personal heads
+            logits = model(x)
             _, pred = torch.max(logits, dim=1)
             correct += (pred == y).sum().item()
             total += y.size(0)
@@ -334,22 +533,21 @@ def save_models(global_model, client_models, policy_net, save_dir="saved_models"
     print(f"Saved RL policy network → {policy_path}")
 
 
-
 # ============================================================
-# 7. Run
+# 6. Run
 # ============================================================
-
 if __name__ == "__main__":
-    # You can change these hyperparameters as needed
     final_global_model, final_policy = train_federated_rl(
-        data_root="/local/scratch/a/dalwis/single_agent_RL_for_pFL/data/cifar_10/split_2_clients",
-        num_clients=2,
+        data_root="/local/scratch/a/dalwis/single_agent_RL_for_pFL/data/cifar_10/split_10_clients",
+        num_clients=10,
         batch_size=64,
-        num_rounds=50,
-        local_epochs=4,
+        num_rounds=100,
+        local_epochs=2,
         lr_local=0.01,
         momentum_local=0.9,
         rl_lr=1e-3,
-        lambda_dist=1e-2,   # penalty weight for Euclidean distance
+        lambda_dist=1e-1,   # penalty weight for Euclidean distance
+        lambda_comm=0.5,   # penalty for exceeding comm budget
+        communication_budgets=[3, 5, 1, 2, 4, 6, 3, 6, 2, 5],  # example: client0 <=3, client1 <=4
         seed=123,
     )
