@@ -290,7 +290,6 @@ def model_to_vectors(model: nn.Module):
 
     return vectors
 
-
 # ============================================================
 # 4. RL + Federated training loop
 # ============================================================
@@ -379,14 +378,14 @@ def train_federated_rl(
     testloader = DataLoader(testset, batch_size=128, shuffle=False)
 
     # ---------- RL policy ----------
-    rl_device = device
-    state_dim = 3  # [communication_budget, last_accuracy, client_id]
-    policy_net = PolicyNet(state_dim=state_dim,
-                           num_actions=num_actions,
-                           hidden_dim=32).to(rl_device)
-    policy_opt = torch.optim.Adam(policy_net.parameters(), lr=rl_lr)
+    # rl_device = device
+    # state_dim = 3  # [communication_budget, last_accuracy, client_id]
+    # policy_net = PolicyNet(state_dim=state_dim,
+    #                        num_actions=num_actions,
+    #                        hidden_dim=32).to(rl_device)
+    # policy_opt = torch.optim.Adam(policy_net.parameters(), lr=rl_lr)
 
-    print(f"RL will choose number of shared layers in [1, {num_actions}] for each client.")
+    # print(f"RL will choose number of shared layers in [1, {num_actions}] for each client.")
 
     # Initialize client models (personalized copy per client)
     if config.model_dataset == 'MNIST':
@@ -397,18 +396,15 @@ def train_federated_rl(
         client_models = {
             cid: ResNet18CIFAR(num_classes=10) for cid in range(num_clients)
         }
-    for cid in range(num_clients):
-        client_models[cid].load_state_dict(global_model.state_dict())
 
     # ---------- Training ----------
     for global_round in range(num_rounds):
         print(f"\n=== Global Round {global_round + 1}/{num_rounds} ===")
 
         client_accuracies = {}
-        client_logprobs = {}
+        # client_logprobs = {}
         client_vectors = {}
         client_share_depths = {}
-        # client_features = {}
 
         # 1) For each client: RL chooses number of layers to share, client trains locally
         for cid in range(num_clients):
@@ -425,14 +421,8 @@ def train_federated_rl(
             state_vec = [budget_norm, last_acc_norm, client_id_norm]
 
             # RL chooses how many layers to share
-            layers_to_share, logprob = select_action(
-                policy_net=policy_net,
-                state_vec=state_vec,
-                device=rl_device,
-            )
-            client_logprobs[cid] = logprob
-            # Hardcode for testing:
-            # layers_to_share = 1
+            layers_to_share, logprob = 3, None
+            # client_logprobs[cid] = logprob
             client_share_depths[cid] = layers_to_share
 
             # ------ Local training ------
@@ -450,47 +440,21 @@ def train_federated_rl(
 
             client_models[cid] = client_model
             client_accuracies[cid] = acc
+            client_vectors[cid] = model_to_vector(client_model)
             client_last_accs[cid] = acc  # update history
-            client_vectors[cid] = model_to_vectors(client_model)
-            # client_model.eval()
-            # with torch.no_grad():
-            #     # Take ONE small batch from this client's loader as reference
-            #     # (you can use more batches if you want less noise)
-            #     # x_rep, _ = next(iter(client_loaders[cid]))
-            #     x_rep, _ = next(iter(testloader))
-            #     x_rep = x_rep.to(device)
 
-            #     feats = client_model.forward_features(x_rep)   # (B, 512)
-            #     feats = F.normalize(feats, p=2, dim=1)        # normalize per sample
-            #     mean_feat = feats.mean(dim=0)                 # (512,)
-            #     mean_feat = F.normalize(mean_feat, p=2, dim=0)
-
-            # client_features[cid] = mean_feat.cpu()
-            # client_model.train()
             print(f"  Client {cid}: layers_shared={layers_to_share}, local_acc={acc:.4f}")
 
         # 2) Compute pairwise distances & rewards (with comm penalty)
         rewards = {}
         for cid in range(num_clients):
             vec_c = client_vectors[cid]
-            shared_layers_c = client_share_depths[cid]
-            # feat_c = client_features[cid]
             dists = []
             for other_cid in range(num_clients):
                 if other_cid == cid:
                     continue
                 vec_o = client_vectors[other_cid]
-                shared_layers_o = client_share_depths[other_cid]
-                concat_vec_c = torch.cat(vec_c[0:min(shared_layers_c, shared_layers_o)], dim=0)
-                concat_vec_o = torch.cat(vec_o[0:min(shared_layers_c, shared_layers_o)], dim=0)
-                # feat_o = client_features[other_cid]
-                d = torch.norm(concat_vec_c - concat_vec_o, p=2).item()   # Euclidean distance
-                # cos_sim = F.cosine_similarity(
-                #     feat_c.unsqueeze(0),  # shape (1, 512)
-                #     feat_o.unsqueeze(0),  # shape (1, 512)
-                #     dim=1
-                # ).item()
-                # d = 1 - cos_sim
+                d = torch.norm(vec_c - vec_o, p=2).item()
                 dists.append(d)
             mean_dist = np.mean(dists) if len(dists) > 0 else 0.0
 
@@ -512,19 +476,19 @@ def train_federated_rl(
                   f"reward={reward:.4f}")
 
         # 3) RL policy update (REINFORCE with per-round baseline)
-        baseline = np.mean(list(rewards.values()))
-        policy_opt.zero_grad()
-        policy_loss = 0.0
+        # baseline = np.mean(list(rewards.values()))
+        # policy_opt.zero_grad()
+        # policy_loss = 0.0
 
-        for cid in range(num_clients):
-            advantage = rewards[cid] - baseline
-            policy_loss = policy_loss - client_logprobs[cid] * advantage
+        # for cid in range(num_clients):
+        #     advantage = rewards[cid] - baseline
+            # policy_loss = policy_loss - client_logprobs[cid] * advantage
 
-        policy_loss = policy_loss / num_clients
-        policy_loss.backward()
-        policy_opt.step()
+        # policy_loss = policy_loss / num_clients
+        # policy_loss.backward()
+        # policy_opt.step()
 
-        print(f"  RL policy loss: {policy_loss.item():.6f}")
+        # print(f"  RL policy loss: {policy_loss.item():.6f}")
 
         # 4) FedAvg only on shared layers
         global_model = fedavg_partial(global_model,
@@ -550,14 +514,14 @@ def train_federated_rl(
     # ================================
     # Save final global + client models
     # ================================
-    save_models(
-        global_model=global_model,
-        client_models=client_models,   # last-round client models
-        policy_net=policy_net,
-        save_dir="/local/scratch/a/dalwis/single_agent_RL_for_pFL/src/weights/split_10_clients_resnet18_MNIST_alpha_5",
-    )
+    # save_models(
+    #     global_model=global_model,
+    #     client_models=client_models,   # last-round client models
+    #     policy_net=policy_net,
+    #     save_dir="/local/scratch/a/dalwis/single_agent_RL_for_pFL/src/weights/split_2_clients_resnet18"
+    # )
 
-    return global_model, policy_net
+    return global_model, None
 
 
 # ============================================================
@@ -607,7 +571,7 @@ def save_models(global_model, client_models, policy_net, save_dir="saved_models"
 # ============================================================
 if __name__ == "__main__":
     final_global_model, final_policy = train_federated_rl(
-        data_root="/local/scratch/a/dalwis/single_agent_RL_for_pFL/data/MNIST/split_10_clients_alpha_1",
+        data_root="/local/scratch/a/dalwis/single_agent_RL_for_pFL/data/MNIST/split_10_clients_alpha_5",
         num_clients=10,
         batch_size=64,
         num_rounds=100,
@@ -615,8 +579,8 @@ if __name__ == "__main__":
         lr_local=0.01,
         momentum_local=0.9,
         rl_lr=1e-3,
-        lambda_dist=0.5,   # penalty weight for Euclidean distance
-        lambda_comm=0.1,   # penalty for exceeding comm budget
+        lambda_dist=1e-2,   # penalty weight for Euclidean distance
+        lambda_comm=1,   # penalty for exceeding comm budget
         communication_budgets=[3, 5, 1, 2, 4, 6, 1, 6, 2, 5],  # example: client0 <=3, client1 <=4
         seed=123,
     )
