@@ -236,6 +236,18 @@ can be included in a `docs/` directory as a compiled PDF.
 PhD Student, Electrical & Computer Engineering  
 Purdue University
 
+**Kavindu Herath**  
+PhD Student, Electrical & Computer Engineering  
+Purdue University
+
+**Nethmi Hewa Withthige**  
+PhD Student, Electrical & Computer Engineering  
+Purdue University
+
+**Lakshika Karunaratne**  
+PhD Student, Electrical & Computer Engineering  
+Purdue University
+
 ---
 
 ## 📜 License
