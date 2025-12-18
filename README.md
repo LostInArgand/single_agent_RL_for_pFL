@@ -86,13 +86,14 @@ deciding agent
 
 ## 🚀 How to Run
 
-### 1. Use the jupyter notebook to run combined RL-Agent
+### 1. Use the jupyter notebook to run combined RL-Agent (Main Program)
 ```bash
 combined_RL_agent_main.ipynb
 ```
 
 ### 2. Run the notebooks in experiments folder to run our experiments
 ```bash
+Layer Selection Experiment.ipynb
 Training Intensity.ipynb
 
 ```
