@@ -1,4 +1,4 @@
-data/
-src/weights
-src/data_loaders/__pycache__
-src/models/__pycache__
+layer_selection_agent/data
+layer_selection_agent/src/weights
+layer_selection_agent/src/data_loaders/__pycache__
+layer_selection_agent/src/models/__pycache__
