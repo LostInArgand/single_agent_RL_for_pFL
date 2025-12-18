@@ -1,193 +1,188 @@
 # Single-Agent Reinforcement Learning for Personalized Federated Learning (pFL)
 
-This repository implements a **single-agent reinforcement learning (RL) framework** to control **personalization and training intensity** in a **federated learning (FL)** system under **client heterogeneity**.
+This repository implements a **single-agent reinforcement learning (RL) framework** for **personalized federated learning (pFL)** under **data and system heterogeneity**.
 
-The key idea is to use **one centralized RL agent at the server** to dynamically decide, **for each participating client**,  
-1. **which model layers should be personalized**, and  
-2. **how many local training epochs should be performed**,  
+The core idea is to use **one centralized RL agent at the server** to dynamically control, **for each participating client**:
 
-subject to constraints such as **data heterogeneity**, **computation limits**, and **communication efficiency**.
+1. **Which model layers are shared vs personalized**
+2. **How much local training to perform (number of local epochs)**
 
-This work is motivated by the observation that **static personalization strategies** (e.g., fixed local heads, fixed local epochs) are suboptimal when clients differ significantly in data distribution and system resources.
-
----
-
-## 📌 Key Contributions
-
-- **Single-agent RL formulation** for personalized federated learning  
-- **Client-specific layer personalization**, including middle-layer personalization  
-- **Adaptive control of local training intensity (epochs)**  
-- Explicit modeling of **client heterogeneity** (data, compute, bandwidth)  
-- Clean separation between:
-  - **FL optimization (cross-entropy loss)**
-  - **RL policy optimization (policy gradient loss)**  
-- Designed to be extensible to **non-RL baselines** (FedAvg, FedProx, FedPer, LG-FedAvg)
+This allows the system to adapt to heterogeneous clients with different data distributions, computational capabilities, and bandwidth constraints, outperforming static personalization strategies.
 
 ---
 
-## 🧠 High-Level Architecture
+## 🔍 Motivation
 
+Traditional federated learning methods (e.g., FedAvg) assume:
+- homogeneous clients,
+- fixed local training schedules,
+- static personalization strategies.
 
+In practice, clients vary significantly in:
+- data distribution (non-IID),
+- compute speed,
+- communication bandwidth.
 
+This project explores whether **a single learning agent** can make **adaptive, client-specific decisions** that improve:
+- global generalization,
+- fairness across clients,
+- computational efficiency.
 
-- **One RL agent** shared across all clients  
-- Each client receives a **personalized action**  
-- Clients train locally using standard supervised learning  
-- The RL agent is trained using **policy gradient methods**
+---
+
+## 🧠 Key Idea
+
+- There is **only one RL agent** (centralized at the server).
+- The agent observes **client states** and outputs **per-client actions**.
+- The same policy network is shared across all clients.
+
+```
+               ┌────────────────────────────┐
+               │   Single RL Agent (Server) │
+               │   πθ(s) → a                │
+               └────────────┬───────────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        ▼                    ▼                    ▼
+     Client 1             Client 2             Client K
+   (state s₁)           (state s₂)           (state sₖ)
+  action a₁             action a₂             action aₖ
+(layer choice,       (layer choice,       (layer choice,
+ local epochs)        local epochs)        local epochs)
+```
 
 ---
 
 ## 📂 Repository Structure
 
+```
 single_agent_RL_for_pFL/
 │
 ├── models/
-│ ├── resnet18.py # CIFAR-style ResNet model
-│ ├── RL_model.py # Policy network for RL agent
+│   ├── resnet18.py              # CIFAR-style ResNet
+│   ├── RL_model.py              # RL policy network
 │
 ├── data_loaders/
-│ ├── cifar_10_dataloader.py # Dirichlet non-IID client splits
+│   ├── cifar_10_dataloader.py   # Dirichlet non-IID splits
 │
 ├── utils/
-│ ├── aggregation.py # FedAvg-style aggregation
-│ ├── evaluation.py # Global & client evaluation
+│   ├── aggregation.py           # FedAvg-style aggregation
+│   ├── evaluation.py            # Global & client evaluation
 │
-├── train_rl_federated.py # Main FL + RL training loop
-├── baseline_federated.py # Non-RL FL baselines
-├── config.py # Hyperparameters & settings
+├── train_rl_federated.py         # Main FL + RL training loop
+├── baseline_federated.py         # Non-RL baselines
+├── config.py                     # Hyperparameters
 │
 ├── requirements.txt
 └── README.md
-
-
+```
 
 ---
 
-## 🔬 Problem Setup
+## 📊 Dataset
 
-### Dataset
 - **CIFAR-10**
   - 50,000 training images → split among clients (non-IID)
   - 10,000 test images → **used only for global evaluation**
 
-### Non-IID Data Split
-- Dirichlet distribution with concentration parameter `α`
-- Smaller `α` → higher data heterogeneity
+> The CIFAR-10 **test set is never used for training**.
 
-### Client Heterogeneity
-Each client is assigned:
-- Dataset size
-- Computational capability
-- Bandwidth level
-- Participation frequency
+---
 
-These factors are included in the **RL state representation**.
+## 🔬 Non-IID Data Partitioning
+
+- Training data is split across clients using a **Dirichlet distribution**.
+- Smaller concentration parameter `α` → higher heterogeneity.
+- Each client receives a different label distribution and dataset size.
+
+---
+
+## ⚙️ Client Heterogeneity
+
+Each client is characterized by:
+- local dataset size,
+- compute capability,
+- bandwidth level,
+- participation frequency,
+- previous model performance.
+
+These attributes are encoded into the **RL state**.
 
 ---
 
 ## 🎯 RL Formulation
 
 ### State (per client)
+
 A compact vector encoding:
-- Compute capacity
-- Bandwidth
-- Local dataset size
-- Previous validation accuracy
-- Training progress
+- normalized compute capacity,
+- normalized bandwidth,
+- local dataset size,
+- previous validation accuracy,
+- training progress.
 
 ### Action (per client)
+
+The RL agent outputs:
 - **Layer personalization decision**
-  - Which blocks are personalized vs shared
+  - which blocks are personalized vs shared
+  - including support for *middle-layer personalization*
 - **Training intensity**
-  - Number of local epochs
+  - number of local epochs
 
 ### Reward
-A scalar reward computed at the server level:
 
----
+A scalar reward computed at the server after each communication round:
 
-## 🔬 Problem Setup
-
-### Dataset
-- **CIFAR-10**
-  - 50,000 training images → split among clients (non-IID)
-  - 10,000 test images → **used only for global evaluation**
-
-### Non-IID Data Split
-- Dirichlet distribution with concentration parameter `α`
-- Smaller `α` → higher data heterogeneity
-
-### Client Heterogeneity
-Each client is assigned:
-- Dataset size
-- Computational capability
-- Bandwidth level
-- Participation frequency
-
-These factors are included in the **RL state representation**.
-
----
-
-## 🎯 RL Formulation
-
-### State (per client)
-A compact vector encoding:
-- Compute capacity
-- Bandwidth
-- Local dataset size
-- Previous validation accuracy
-- Training progress
-
-### Action (per client)
-- **Layer personalization decision**
-  - Which blocks are personalized vs shared
-- **Training intensity**
-  - Number of local epochs
-
-### Reward
-A scalar reward computed at the server level:
-
+```
 reward = α · Δ(global test accuracy)
-− β · client accuracy variance
-− γ · compute / communication cost
-
+       − β · variance(client accuracies)
+       − γ · compute / communication cost
+```
 
 This encourages:
-- Better generalization
-- Fairness across clients
-- Efficient resource usage
+- good global generalization,
+- fairness across clients,
+- efficient use of resources.
 
 ---
 
 ## 📉 Loss Functions
 
-### Client-side (Supervised Learning)
-Standard cross-entropy loss:
+### Client-Side Learning
+
+Each client trains its local model using standard supervised learning:
+
 \[
 \mathcal{L}_{client} = \text{CrossEntropy}(y, f(x))
 \]
 
-### RL Agent (Policy Gradient)
-REINFORCE-style objective:
+### RL Agent Loss (Policy Gradient)
+
+The RL agent is trained using a REINFORCE-style objective:
+
 \[
-\mathcal{L}_{RL} = - \sum_{t,k} \log \pi_\theta(a_{k,t} \mid s_{k,t}) \cdot G_t
+\mathcal{L}_{RL} = - \sum_{t,k}
+\log \pi_\theta(a_{k,t} \mid s_{k,t}) \cdot G_t
 \]
 
 where \( G_t \) is the discounted return.
 
+The RL loss is **completely separate** from the client training loss.
+
 ---
 
-## 🧪 Baselines Supported
+## 🧪 Baselines
 
-The framework supports easy comparison with classical FL and pFL methods:
+The framework supports comparison against classical FL and pFL methods:
 
 - **FedAvg**
 - **FedProx**
 - **FedPer**
 - **LG-FedAvg**
-- **Static personalization (fixed layers + fixed epochs)**
+- **Static personalization** (fixed layers + fixed local epochs)
 
-These baselines do **not** use RL and serve as strong reference points.
+These baselines do **not** use reinforcement learning.
 
 ---
 
@@ -196,13 +191,53 @@ These baselines do **not** use RL and serve as strong reference points.
 ### 1. Install dependencies
 ```bash
 pip install -r requirements.txt
+```
 
-
-2. Train RL-controlled pFL
+### 2. Run RL-based personalized FL
+```bash
 python train_rl_federated.py
+```
 
-
-3. Run baselines
+### 3. Run non-RL baselines
+```bash
 python baseline_federated.py
+```
 
+---
 
+## 📈 Evaluation Metrics
+
+- **Global accuracy** (CIFAR-10 test set)
+- **Client fairness**
+  - mean and variance of client accuracies
+- **Efficiency**
+  - number of local updates
+  - communication cost
+- **Policy behavior**
+  - distribution of selected layers and local epochs
+
+---
+
+## 📄 Project Report (LaTeX / PDF)
+
+A full technical report (written in LaTeX) describing:
+- formal problem formulation,
+- RL state–action–reward definitions,
+- algorithm details,
+- experimental results and ablations,
+
+can be included in a `docs/` directory as a compiled PDF.
+
+---
+
+## 👤 Author
+
+**Praditha Alwis**  
+PhD Student, Electrical & Computer Engineering  
+Purdue University
+
+---
+
+## 📜 License
+
+MIT License
