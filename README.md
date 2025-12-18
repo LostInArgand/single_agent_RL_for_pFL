@@ -170,21 +170,6 @@ where \( G_t \) is the discounted return.
 
 The RL loss is **completely separate** from the client training loss.
 
----
-
-## 🧪 Baselines
-
-The framework supports comparison against classical FL and pFL methods:
-
-- **FedAvg**
-- **FedProx**
-- **FedPer**
-- **LG-FedAvg**
-- **Static personalization** (fixed layers + fixed local epochs)
-
-These baselines do **not** use reinforcement learning.
-
----
 
 ## 🚀 How to Run
 
