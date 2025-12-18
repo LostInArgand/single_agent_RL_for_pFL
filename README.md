@@ -57,23 +57,22 @@ This project explores whether **a single learning agent** can make **adaptive, c
 
 ```
 single_agent_RL_for_pFL/
+├
+├── docs/
+|   ├── project_report.pdf      # Project Report
 │
-├── models/
-│   ├── resnet18.py              # CIFAR-style ResNet
-│   ├── RL_model.py              # RL policy network
+├── experiments/
+│   ├── Layer Selection Experiment.ipynb              # Experiments to find a proper action space for layer selection agent
+│   ├── Training Intensity.ipynb                      # Experiments to find a proper action space for training intensity 
+deciding agent
+|
+├── layer_selection_agent/
+│   ├── data
+│   ├── plots
+|   ├── results
+│   ├── src
 │
-├── data_loaders/
-│   ├── cifar_10_dataloader.py   # Dirichlet non-IID splits
-│
-├── utils/
-│   ├── aggregation.py           # FedAvg-style aggregation
-│   ├── evaluation.py            # Global & client evaluation
-│
-├── train_rl_federated.py         # Main FL + RL training loop
-├── baseline_federated.py         # Non-RL baselines
-├── config.py                     # Hyperparameters
-│
-├── requirements.txt
+├── combined_RL_agent_main.ipynb
 └── README.md
 ```
 
@@ -82,126 +81,35 @@ single_agent_RL_for_pFL/
 ## 📊 Dataset
 
 - **CIFAR-10**
-  - 50,000 training images → split among clients (non-IID)
-  - 10,000 test images → **used only for global evaluation**
-
-> The CIFAR-10 **test set is never used for training**.
-
----
-
-## 🔬 Non-IID Data Partitioning
-
-- Training data is split across clients using a **Dirichlet distribution**.
-- Smaller concentration parameter `α` → higher heterogeneity.
-- Each client receives a different label distribution and dataset size.
-
----
-
-## ⚙️ Client Heterogeneity
-
-Each client is characterized by:
-- local dataset size,
-- compute capability,
-- bandwidth level,
-- participation frequency,
-- previous model performance.
-
-These attributes are encoded into the **RL state**.
-
----
-
-## 🎯 RL Formulation
-
-### State (per client)
-
-A compact vector encoding:
-- normalized compute capacity,
-- normalized bandwidth,
-- local dataset size,
-- previous validation accuracy,
-- training progress.
-
-### Action (per client)
-
-The RL agent outputs:
-- **Layer personalization decision**
-  - which blocks are personalized vs shared
-  - including support for *middle-layer personalization*
-- **Training intensity**
-  - number of local epochs
-
-### Reward
-
-A scalar reward computed at the server after each communication round:
-
-```
-reward = α · Δ(global test accuracy)
-       − β · variance(client accuracies)
-       − γ · compute / communication cost
-```
-
-This encourages:
-- good global generalization,
-- fairness across clients,
-- efficient use of resources.
-
----
-
-## 📉 Loss Functions
-
-### Client-Side Learning
-
-Each client trains its local model using standard supervised learning:
-
-\[
-\mathcal{L}_{client} = \text{CrossEntropy}(y, f(x))
-\]
-
-### RL Agent Loss (Policy Gradient)
-
-The RL agent is trained using a REINFORCE-style objective:
-
-\[
-\mathcal{L}_{RL} = - \sum_{t,k}
-\log \pi_\theta(a_{k,t} \mid s_{k,t}) \cdot G_t
-\]
-
-where \( G_t \) is the discounted return.
-
-The RL loss is **completely separate** from the client training loss.
+- **MNIST**
 
 
 ## 🚀 How to Run
 
-### 1. Install dependencies
+### 1. Use the jupyter notebook to run combined RL-Agent
 ```bash
-pip install -r requirements.txt
+combined_RL_agent_main.ipynb
 ```
 
-### 2. Run RL-based personalized FL
+### 2. Run the notebooks in experiments folder to run our experiments
 ```bash
-python train_rl_federated.py
+Training Intensity.ipynb
+
+```
+### 3. To run the layer selection RL agent. Go to layer_selection_agent/src and run.
+```bash
+python train_RL.py
+
 ```
 
-### 3. Run non-RL baselines
+### 4. To run the layer selection baseline. Go to layer_selection_agent/src and run.
 ```bash
-python baseline_federated.py
+python train_baseline.py
+
 ```
 
 ---
 
-## 📈 Evaluation Metrics
-
-- **Global accuracy** (CIFAR-10 test set)
-- **Client fairness**
-  - mean and variance of client accuracies
-- **Efficiency**
-  - number of local updates
-  - communication cost
-- **Policy behavior**
-  - distribution of selected layers and local epochs
-
----
 
 ## 📄 Project Report (LaTeX / PDF)
 
